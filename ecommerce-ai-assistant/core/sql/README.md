@@ -1,22 +1,28 @@
 # SQL Processing Module
 
 ## Overview
-This module handles SQL query generation from natural language and query validation for the E-commerce AI Assistant.
+This module handles SQL query generation and validation, converting natural language queries into SQL using schema metadata and validating queries for security and correctness.
 
 ## Components
 
 ### SQL Generator (`generator.py`)
-Converts natural language queries into SQL, handling:
-- Time period parsing
-- Platform-specific fields
-- Query templates
-- Parameter generation
+Converts natural language queries into SQL:
+- Uses schema metadata
+- Supports multiple platforms
+- Handles temporal queries
+- Manages query parameters
 
 ```python
 from core.sql import SQLGenerator
+from core.metadata import SchemaRegistry
 
-generator = SQLGenerator()
-query, params = await generator.generate_query(
+# Initialize
+registry = SchemaRegistry()
+await registry.initialize()
+generator = SQLGenerator(registry)
+
+# Generate query
+query, params, tables = await generator.generate_query(
     text="What were my total sales last month?",
     platforms={"shopify", "amazon"},
     query_type="sales"
@@ -25,344 +31,301 @@ query, params = await generator.generate_query(
 
 ### SQL Validator (`validator.py`)
 Validates SQL queries for:
-- SQL injection risks
-- Table existence
+- Security risks
+- Schema compliance
 - Query structure
-- Query execution
+- Parameter validation
 
 ```python
 from core.sql import SQLValidator
 
-validator = SQLValidator()
-is_valid = await validator.validate_query(query)
+validator = SQLValidator(registry)
+is_valid, error = await validator.validate_query(query, params)
 ```
 
-## Usage Examples
+## Query Generation Flow
 
-### 1. Basic Query Generation
+```mermaid
+graph TD
+    A[Natural Language Query] --> B[Parse Query Intent]
+    B --> C[Identify Required Tables]
+    C --> D[Get Time Range]
+    D --> E[Build Join Paths]
+    E --> F[Get Query Template]
+    F --> G[Build Final Query]
+    G --> H[Add Parameters]
+    H --> I[Validate Query]
+```
+
+## Sample Queries
+
+### 1. Sales Analysis
 ```python
-generator = SQLGenerator()
-
-# Generate sales query
-query, params = await generator.generate_query(
-    text="Show me sales from last month",
-    platforms={"shopify"},
-    query_type="sales"
-)
-
-# The generated query might look like:
+# Query: "Show me total sales by platform for last month"
+# Generated SQL:
 """
 SELECT 
     platform,
+    COUNT(DISTINCT order_id) as order_count,
     SUM(total_amount) as total_sales
 FROM `project.dataset.consolidated_orders`
-WHERE created_at BETWEEN @start_date AND @end_date
-AND platform = 'shopify'
+WHERE order_date BETWEEN @start_date AND @end_date
 GROUP BY platform
 """
 ```
 
-### 2. Query Validation
+### 2. Product Analysis
 ```python
-validator = SQLValidator()
-
-# Validate query
-if await validator.validate_query(query):
-    # Execute query
-    ...
-else:
-    # Handle invalid query
-    ...
+# Query: "What are my top selling products?"
+# Generated SQL:
+"""
+SELECT 
+    p.product_name,
+    COUNT(DISTINCT o.order_id) as order_count,
+    SUM(oi.quantity) as units_sold,
+    SUM(oi.total_amount) as revenue
+FROM `project.dataset.consolidated_orders` o
+JOIN `project.dataset.order_items` oi ON o.order_id = oi.order_id
+JOIN `project.dataset.products` p ON oi.product_id = p.product_id
+WHERE o.order_date BETWEEN @start_date AND @end_date
+GROUP BY p.product_id, p.product_name
+ORDER BY revenue DESC
+LIMIT 10
+"""
 ```
 
-## Query Templates
-Templates are defined in `app.config.constants`:
+## Validation Process
 
+### 1. Security Validation
 ```python
-SQL_TEMPLATES = {
-    "sales_total": """
-        SELECT 
-            platform,
-            SUM(total_amount) as total_sales
-        FROM `{dataset}.{table}`
-        WHERE {date_condition}
-        GROUP BY platform
-    """
-}
+# Check for SQL injection risks
+patterns = [
+    r';\s*DROP\s+',
+    r';\s*DELETE\s+',
+    r'UNION\s+SELECT'
+]
 ```
 
-## Security Features
+### 2. Schema Validation
+```python
+# Validate table references
+for table in tables:
+    if not registry.table_exists(table):
+        raise ValueError(f"Invalid table: {table}")
+```
 
-### 1. SQL Injection Prevention
-- Parameter binding
-- Pattern detection
-- Query structure validation
+### 3. Query Structure
+```python
+# Example structure validation
+def _validate_query_structure(self, query: str) -> bool:
+    # Must have SELECT
+    if not re.search(r'^\s*SELECT', query, re.IGNORECASE):
+        return False
+    
+    # Must have FROM
+    if not re.search(r'\sFROM\s', query, re.IGNORECASE):
+        return False
+    
+    return True
+```
 
-### 2. Access Control
-- Table reference validation
-- Project/dataset validation
-- Permission checking
+## Using with Different Platforms
+
+### Platform-Specific Tables
+```yaml
+# Schema: shopify/orders.yaml
+table_name: shopify_orders
+columns:
+  - name: order_id
+    type: STRING
+    business_term: "Order ID"
+  - name: created_at
+    type: TIMESTAMP
+    business_term: "Order Date"
+```
+
+### Consolidated Tables
+```yaml
+# Schema: consolidated/orders.yaml
+table_name: consolidated_orders
+columns:
+  - name: order_id
+    type: STRING
+  - name: platform
+    type: STRING
+    enums: ["shopify", "amazon", "ebay"]
+  - name: order_date
+    type: TIMESTAMP
+```
 
 ## Best Practices
 
 ### 1. Query Generation
-- Use parameterized queries
-- Validate all inputs
-- Handle platform differences
-- Include proper error handling
+```python
+# Always use parameterized queries
+query = """
+SELECT *
+FROM `{project}.{dataset}.{table}`
+WHERE date BETWEEN @start_date AND @end_date
+  AND platform IN UNNEST(@platforms)
+"""
 
-### 2. Query Validation
-- Check table existence
-- Validate query structure
-- Use dry runs
-- Log validation failures
-
-## Testing
-```bash
-# Run SQL module tests
-pytest tests/core/sql/
-
-# Test specific components
-pytest tests/core/sql/test_generator.py
-pytest tests/core/sql/test_validator.py
+# Never string concatenation
+# BAD: query = f"... WHERE date = '{date}'"
 ```
 
-## Contributing
-When adding new features:
-1. Add appropriate tests
-2. Update documentation
-3. Follow security best practices
-4. Add logging statements
-5. Update query templates if needed
+### 2. Table References
+```python
+# Always use fully qualified names
+table_ref = f"`{project_id}.{dataset}.{table}`"
 
-## Future Enhancements
-- [ ] Add query optimization logic
-- [ ] Implement query cost estimation
-- [ ] Add support for more complex analytical queries
-- [ ] Implement query caching
-- [ ] Add query performance metrics collection
-- [ ] Enhance time period parsing
-- [ ] Add support for custom templates
-- [ ] Implement query plan analysis
+# Include platform filtering when needed
+if platforms:
+    query += "AND platform IN UNNEST(@platforms)"
+```
 
-## Error Handling
-
-### Query Generation Errors
+### 3. Error Handling
 ```python
 try:
     query, params = await generator.generate_query(text, platforms)
 except ValueError as e:
-    # Handle invalid input
     logger.error("Invalid query input", error=str(e))
 except Exception as e:
-    # Handle unexpected errors
     logger.error("Query generation failed", error=str(e))
 ```
 
-### Validation Errors
+### 4. Validation
+```python
+# Always validate before execution
+is_valid, error = await validator.validate_query(query, params)
+if not is_valid:
+    raise ValueError(f"Invalid query: {error}")
+```
+
+## Performance Considerations
+
+### 1. Query Optimization
+```sql
+-- Use appropriate filters
+WHERE date >= @start_date
+  AND platform IN UNNEST(@platforms)
+
+-- Limit result sets
+LIMIT @limit
+
+-- Use column pruning
+SELECT specific_columns
+FROM table
+```
+
+### 2. Join Optimization
+```sql
+-- Use proper join types
+INNER JOIN when possible
+LEFT JOIN when needed
+
+-- Join order matters
+FROM smallest_table
+JOIN larger_table
+JOIN largest_table
+```
+
+## Common Patterns
+
+### 1. Time-Based Queries
+```python
+time_patterns = {
+    "last_month": lambda now: (
+        now.replace(day=1) - timedelta(days=1),
+        now.replace(day=1)
+    ),
+    "this_year": lambda now: (
+        now.replace(month=1, day=1),
+        now
+    )
+}
+```
+
+### 2. Platform Handling
+```python
+platform_configs = {
+    "shopify": {
+        "date_field": "created_at",
+        "amount_field": "total_price"
+    },
+    "amazon": {
+        "date_field": "purchase_date",
+        "amount_field": "order_total"
+    }
+}
+```
+
+## Testing
+
+### 1. Generator Tests
+```python
+def test_generate_sales_query():
+    query, params, tables = await generator.generate_query(
+        "Show me sales from last month",
+        platforms={"shopify"}
+    )
+    assert "SELECT" in query
+    assert "total_amount" in query
+    assert "consolidated_orders" in tables
+```
+
+### 2. Validator Tests
+```python
+def test_validate_query():
+    is_valid, error = await validator.validate_query(
+        "SELECT * FROM `project.dataset.table`"
+    )
+    assert is_valid
+    assert error is None
+```
+
+## Error Handling
+
+### 1. Generator Errors
+```python
+class QueryGenerationError(Exception):
+    def __init__(self, message: str, query_text: str):
+        self.message = message
+        self.query_text = query_text
+        super().__init__(self.message)
+```
+
+### 2. Validation Errors
 ```python
 class ValidationError(Exception):
     def __init__(self, message: str, query: str):
         self.message = message
         self.query = query
         super().__init__(self.message)
-
-# Usage
-if not await validator.validate_query(query):
-    raise ValidationError("Invalid query structure", query)
 ```
 
-## Performance Considerations
+## Future Enhancements
+- [ ] Query cost estimation
+- [ ] Advanced query optimization
+- [ ] Query plan analysis
+- [ ] Query caching
+- [ ] Performance metrics collection
+- [ ] Enhanced time parsing
+- [ ] Custom template support
+- [ ] Query plan visualization
 
-### Query Optimization
-- Use appropriate indexes
-- Limit result sets
-- Optimize JOIN operations
-- Use column pruning
-- Consider partitioning
-
-```python
-# Example of optimized query template
-OPTIMIZED_TEMPLATE = """
-SELECT {selected_columns}
-FROM `{dataset}.{table}`
-WHERE {date_condition}
-    AND platform IN UNNEST(@platforms)
-{group_by}
-{having}
-LIMIT @limit
-"""
-```
-
-### Resource Management
-- Set query timeout
-- Implement retry logic
-- Handle connection pooling
-- Monitor query costs
-
-```python
-# Example configuration
-QUERY_TIMEOUT = 30  # seconds
-MAX_ROWS = 10000
-RETRY_ATTEMPTS = 3
-```
-
-## Monitoring and Logging
-
-### Query Metrics
-- Generation time
-- Validation time
-- Query execution time
-- Error rates
-- Resource usage
-
-```python
-# Example logging
-logger.info(
-    "Query metrics",
-    generation_time=gen_time,
-    validation_time=val_time,
-    query_size=len(query),
-    tables_referenced=len(tables)
-)
-```
-
-### Performance Tracking
-```python
-from utils.logger import log_execution_time
-
-@log_execution_time(logger)
-async def generate_and_validate(text: str, platforms: Set[str]):
-    query, params = await generator.generate_query(text, platforms)
-    is_valid = await validator.validate_query(query)
-    return query, params, is_valid
-```
-
-## Integration Examples
-
-### With BigQuery
-```python
-from google.cloud import bigquery
-
-async def execute_query(query: str, params: Dict):
-    client = bigquery.Client()
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("start_date", "DATE", params["start_date"]),
-            bigquery.ScalarQueryParameter("end_date", "DATE", params["end_date"]),
-        ]
-    )
-    
-    query_job = client.query(query, job_config=job_config)
-    return query_job.result()
-```
-
-### With Response Formatting
-```python
-async def process_query_results(results, query_type: str):
-    if query_type == "sales":
-        return {
-            "total_sales": sum(row.total_sales for row in results),
-            "by_platform": {row.platform: row.total_sales for row in results}
-        }
-    # Add more result processing logic
-```
-
-## Common Patterns
-
-### Time Period Handling
-```python
-# Example time patterns
-TIME_PATTERNS = {
-    "last_month": lambda: (start_of_last_month(), end_of_last_month()),
-    "this_year": lambda: (start_of_year(), today()),
-    "last_7_days": lambda: (days_ago(7), today())
-}
-```
-
-### Platform-Specific Logic
-```python
-# Example platform configurations
-PLATFORM_CONFIGS = {
-    "shopify": {
-        "date_field": "created_at",
-        "amount_field": "total_amount"
-    },
-    "amazon": {
-        "date_field": "order_date",
-        "amount_field": "item_total"
-    }
-}
-```
-
-## Troubleshooting Guide
-
-### Common Issues
-
-1. **Invalid Query Structure**
-   ```python
-   # Check query structure
-   if not re.search(r'^\s*SELECT', query, re.IGNORECASE):
-       logger.error("Query must start with SELECT")
-   ```
-
-2. **Missing Tables**
-   ```python
-   # Validate table existence
-   if not await validator._validate_table_references(query):
-       logger.error("One or more tables do not exist")
-   ```
-
-3. **Performance Issues**
-   ```python
-   # Monitor query performance
-   if execution_time > QUERY_TIMEOUT:
-       logger.warning("Query execution exceeded timeout")
-   ```
-
-## API Reference
-
-### SQLGenerator
-```python
-class SQLGenerator:
-    async def generate_query(
-        text: str,
-        platforms: Set[str],
-        query_type: Optional[str] = None
-    ) -> Tuple[str, Dict]:
-        """
-        Generate SQL query from natural language.
-        
-        Args:
-            text: Natural language query
-            platforms: Set of platforms to query
-            query_type: Optional query type hint
-            
-        Returns:
-            Tuple of (SQL query, query parameters)
-        """
-```
-
-### SQLValidator
-```python
-class SQLValidator:
-    async def validate_query(query: str) -> bool:
-        """
-        Validate SQL query for security and correctness.
-        
-        Args:
-            query: SQL query to validate
-            
-        Returns:
-            bool: True if query is valid
-        """
-```
+## Contributing
+When adding new features:
+1. Update schema definitions
+2. Add appropriate tests
+3. Document query patterns
+4. Follow security practices
+5. Include error handling
+6. Add logging statements
+7. Update documentation
 
 ## Dependencies
 - google-cloud-bigquery
-- sqlparse
-- structlog
-- pydantic
-
-## License
-Proprietary - All rights reserved.
+- networkx (for schema relationships)
+- pyyaml (for schema loading)
+- structlog (for logging)
