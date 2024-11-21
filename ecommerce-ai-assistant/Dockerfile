@@ -34,7 +34,8 @@ COPY . .
 ENV PORT=8080 \
     ENVIRONMENT=production \
     WORKERS_PER_CORE=1 \
-    MAX_WORKERS=4
+    MAX_WORKERS=4 \
+    LOG_LEVEL=INFO
 
 # Expose port
 EXPOSE ${PORT}
